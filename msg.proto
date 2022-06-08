@@ -1,0 +1,20 @@
+syntax = "proto3";
+
+package pubsub;
+
+option go_package = "github.com/yndd/pubsub";
+
+message Msg {
+  uint64 sequence = 1; // Msg sequence number
+  string subject = 2; // Subject the message is written to
+  int64 timestamp = 3; // Data timestamp
+  Operation operation = 4; // message type: Update, Delete
+  bytes data = 5; // message data
+  map<string, string> tags = 6; // message tags
+}
+
+enum Operation {
+  OPERATION_UNSPECIFIED = 0;
+  OPERATION_UPDATE = 1;
+  OPERATION_DELETE = 2;
+}
