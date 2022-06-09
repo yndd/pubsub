@@ -12,7 +12,8 @@ import (
 )
 
 const (
-	reconnectDelay = time.Second
+	reconnectDelay  = time.Second
+	defaultNATSAddr = "nats.ndd-system.svc.cluster.local"
 )
 
 type natsPublisher struct {
@@ -32,6 +33,9 @@ type Config struct {
 func NewNATSPublisher(c Config, l logging.Logger) Publisher {
 	if l == nil {
 		l = logging.NewNopLogger()
+	}
+	if c.Address == "" {
+		c.Address = defaultNATSAddr
 	}
 	return &natsPublisher{
 		Config: c,
@@ -145,7 +149,7 @@ STARTCONN:
 	default:
 		nc, err := nats.Connect(p.Address, opts...)
 		if err != nil {
-			p.logger.Info("nats connection failed", "error", ctx.Err())
+			p.logger.Info("nats connection failed", "error", err)
 			time.Sleep(time.Second)
 			goto STARTCONN
 		}
