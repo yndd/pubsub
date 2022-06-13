@@ -30,18 +30,14 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	defer subsc.Stop()
-
-	go func() {
-		for m := range subsc.Subscribe(ctx, name+"0", subject) {
-			fmt.Printf("0: %s: %+v\n", time.Now(), m)
-		}
-	}()
-
-	go func() {
-		for m := range subsc.Subscribe(ctx, name+"1", subject) {
-			fmt.Printf("1: %s: %+v\n", time.Now(), m)
-		}
-	}()
+	defer subsc.Stop(name, subject)
+	for i := 0; i < 10; i++ {
+		time.Sleep(time.Millisecond)
+		go func(i int) {
+			for m := range subsc.Subscribe(ctx, fmt.Sprintf("%s-%d", name, i), subject) {
+				fmt.Printf("%s-%d: %s: %+v\n", name, i, time.Now(), m)
+			}
+		}(i)
+	}
 	<-ctx.Done()
 }

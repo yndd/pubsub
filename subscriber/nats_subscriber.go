@@ -2,6 +2,7 @@ package subscriber
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
@@ -21,8 +22,9 @@ type natsSubscriber struct {
 	Config
 	logger logging.Logger
 
-	m  *sync.RWMutex
-	nc *nats.Conn
+	m           *sync.RWMutex
+	nc          *nats.Conn
+	subscribers map[string]map[string]context.CancelFunc
 }
 
 type Config struct {
@@ -47,9 +49,10 @@ func NewNATSSubscriber(c Config, l logging.Logger) Subscriber {
 		c.BufferSize = defaultBufferSize
 	}
 	return &natsSubscriber{
-		Config: c,
-		logger: l,
-		m:      &sync.RWMutex{},
+		Config:      c,
+		logger:      l,
+		m:           &sync.RWMutex{},
+		subscribers: make(map[string]map[string]context.CancelFunc),
 	}
 }
 
@@ -227,6 +230,14 @@ func (s *natsSubscriber) subscribeCh(ctx context.Context, name, subject string, 
 		opts = append(opts, nats.Durable(name))
 	}
 	logger := s.logger.WithValues("name", name, "subject", subject)
+
+	ctx, cancel := context.WithCancel(ctx)
+	s.m.Lock()
+	if _, ok := s.subscribers[name]; !ok {
+		s.subscribers[name] = make(map[string]context.CancelFunc)
+	}
+	s.subscribers[name][subject] = cancel
+	s.m.Unlock()
 START:
 	select {
 	case <-ctx.Done():
@@ -290,6 +301,15 @@ func (s *natsSubscriber) queueSubscribeCh(ctx context.Context, name, queue strin
 		opts = append(opts, nats.Durable(name))
 	}
 	logger := s.logger.WithValues("name", name, "queue", queue, "subject", subject)
+
+	ctx, cancel := context.WithCancel(ctx)
+	s.m.Lock()
+	qname := fmt.Sprintf("%s/%s", queue, name)
+	if _, ok := s.subscribers[name]; !ok {
+		s.subscribers[qname] = make(map[string]context.CancelFunc)
+	}
+	s.subscribers[qname][subject] = cancel
+	s.m.Unlock()
 START:
 	select {
 	case <-ctx.Done():
@@ -344,9 +364,36 @@ START:
 	}
 }
 
-func (s *natsSubscriber) Stop() {
+func (s *natsSubscriber) Stop(name, subject string) {
+	s.m.Lock()
+	defer s.m.Unlock()
+	// no connection, nothing to stop
 	if s.nc == nil {
+		s.subscribers = make(map[string]map[string]context.CancelFunc)
 		return
 	}
-	s.nc.Close()
+	// no name, stop all
+	if name == "" {
+		for _, subj := range s.subscribers {
+			for _, cfn := range subj {
+				cfn()
+			}
+		}
+		s.nc.Close()
+		return
+	}
+	// name provided, check if it exists
+	if subj, ok := s.subscribers[name]; ok {
+		// name exists, no subject provided, stop all subscription to all subject for the named subscriber
+		if subject == "" {
+			for _, cfn := range subj {
+				cfn()
+			}
+			return
+		}
+		// name exists and subject provided
+		if cfn, ok := subj[subject]; ok {
+			cfn()
+		}
+	}
 }

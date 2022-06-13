@@ -26,8 +26,8 @@ func main() {
 		Insecure: true,
 	}, logging.NewLogrLogger(l))
 
-	defer subsc.Stop()
-	
+	defer subsc.Stop(name, subject)
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	for m := range subsc.Subscribe(ctx, name, subject) {
