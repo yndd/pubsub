@@ -3,6 +3,7 @@ module github.com/yndd/pubsub
 go 1.17
 
 require (
+	github.com/google/uuid v1.3.0
 	github.com/nats-io/jsm.go v0.0.33
 	github.com/nats-io/nats.go v1.16.0
 	github.com/yndd/ndd-runtime v0.5.18

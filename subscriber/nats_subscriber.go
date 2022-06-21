@@ -2,10 +2,12 @@ package subscriber
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	jsm "github.com/nats-io/jsm.go"
 	"github.com/nats-io/nats.go"
 	"github.com/yndd/ndd-runtime/pkg/logging"
@@ -14,8 +16,10 @@ import (
 )
 
 const (
-	reconnectDelay    = time.Second
-	defaultBufferSize = 1024
+	reconnectDelay     = time.Second
+	defaultBufferSize  = 1024
+	fetchBatchSize     = 100
+	defaultPullMaxWait = 100 * time.Millisecond
 )
 
 type natsSubscriber struct {
@@ -36,6 +40,8 @@ type Config struct {
 	BufferSize uint64
 	// NATS insecure connection
 	Insecure bool
+	// Pull max wait time
+	PullMaxWait time.Duration
 	//
 	CertificateSecret   string
 	CaCertificateSecret string
@@ -47,6 +53,9 @@ func NewNATSSubscriber(c Config, l logging.Logger) Subscriber {
 	}
 	if c.BufferSize == 0 {
 		c.BufferSize = defaultBufferSize
+	}
+	if c.PullMaxWait <= 0 {
+		c.PullMaxWait = defaultPullMaxWait
 	}
 	return &natsSubscriber{
 		Config:      c,
@@ -364,6 +373,90 @@ START:
 	}
 }
 
+func (s *natsSubscriber) Get(ctx context.Context, subject string) ([]*pubsub.Msg, error) {
+	return s.pull(ctx, "", subject, nats.DeliverLastPerSubject())
+}
+
+func (s *natsSubscriber) pull(ctx context.Context, name, subject string, opts ...nats.SubOpt) ([]*pubsub.Msg, error) {
+	logger := s.logger.WithValues("pull", "subject", subject)
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+		jsc, err := s.dialConn(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("nats dial connection failed error: %v", err)
+		}
+		if name == "" {
+			name = uuid.New().String()
+		}
+		logger.Info("creating pull subscription")
+
+		sub, err := jsc.PullSubscribe(subject, name, opts...)
+		if err != nil {
+			return nil, err
+		}
+
+		deadline := time.Now() // get messages with timestamp before this deadline
+		done := false          // set to true when we get a msg with a timestamp after the deadline
+
+		rs := make([]*pubsub.Msg, 0, fetchBatchSize)
+		for {
+			if done {
+				break
+			}
+			logger.Debug("fetching next batch of msgs")
+			natsMsgs, err := sub.Fetch(fetchBatchSize, nats.MaxWait(s.PullMaxWait))
+			if err != nil {
+				if errors.Is(err, nats.ErrTimeout) {
+					logger.Debug("no new messages, breaking")
+					break
+				}
+				logger.Info("fetch err", "err", err)
+				break
+			}
+			numMsgs := len(natsMsgs)
+			logger.Info("fetch done", "numMsgs", numMsgs)
+			if numMsgs == 0 {
+				break
+			}
+			for _, nm := range natsMsgs {
+				logger.Debug("received msg", "msg", nm)
+				err = nm.Ack(nats.Context(ctx))
+				if err != nil {
+					logger.Info("msg ack failed", "error", err)
+					continue
+				}
+				logger.Debug("acked msg", "msg", nm)
+
+				msgInfo, err := jsm.ParseJSMsgMetadata(nm)
+				if err != nil {
+					logger.Info("msg metadata parse failed", "error", err)
+					continue
+				}
+				if msgInfo.TimeStamp().After(deadline) {
+					done = true
+					break
+				}
+				logger.Debug("rcvd msgInfo", "msgInfo", msgInfo)
+				m := new(pubsub.Msg)
+				err = proto.Unmarshal(nm.Data, m)
+				if err != nil {
+					logger.Info("proto unmarshal failed", "error", err)
+					continue
+				}
+				m.Sequence = msgInfo.StreamSequence()
+				rs = append(rs, m)
+			}
+		}
+		return rs, nil
+	}
+}
+
 func (s *natsSubscriber) Stop(name, subject string) {
 	s.m.Lock()
 	defer s.m.Unlock()
@@ -380,6 +473,7 @@ func (s *natsSubscriber) Stop(name, subject string) {
 			}
 		}
 		s.nc.Close()
+		s.subscribers = make(map[string]map[string]context.CancelFunc)
 		return
 	}
 	// name provided, check if it exists
@@ -389,11 +483,13 @@ func (s *natsSubscriber) Stop(name, subject string) {
 			for _, cfn := range subj {
 				cfn()
 			}
+			delete(s.subscribers, name)
 			return
 		}
 		// name exists and subject provided
 		if cfn, ok := subj[subject]; ok {
 			cfn()
+			delete(subj, subject)
 		}
 	}
 }

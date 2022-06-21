@@ -39,4 +39,6 @@ type Subscriber interface {
 	QueueSubscribeSinceCh(ctx context.Context, name, queue, subject string, ts time.Time, ch chan *pubsub.Msg)
 	//
 	Stop(name, subject string)
+	//
+	Get(ctx context.Context, subject string) ([]*pubsub.Msg, error)
 }
